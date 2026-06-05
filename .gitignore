@@ -1,0 +1,26 @@
+# 环境变量（含 API Key）
+config/.env
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Virtual environment
+llm_env/
+venv/
+
+# Claude (排除 agents 和 skills，它们是项目配置)
+.claude/*
+!.claude/agents/
+!.claude/skills/
