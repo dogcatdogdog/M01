@@ -10,7 +10,6 @@
 import json
 import logging
 import re
-import string
 from typing import Optional
 
 from src.schemas import IntentCategory, IntentResult, IntentSlot, INTENT_ROUTING
@@ -19,49 +18,73 @@ logger = logging.getLogger(__name__)
 
 
 # ─── 注入检测 ───────────────────────────────────────────────
+#
+# 参考:
+#   - Google Security Blog: "Mitigating prompt injection attacks" (分层防御)
+#   - OWASP LLM01:2025 Prompt Injection
+#   - protectai/llm-guard: 基于 ML 的注入扫描器
+#
+# 设计原则（语言无关，不做关键词匹配）:
+#   1. 正向约束：定义什么是"合法语音指令"，不符合即可疑
+#      合法语音指令 = 简短 + 自然语言 + 无语义攻击结构
+#   2. 结构异常检测：代码块/JSON/系统指令语法在任何语言中都不该出现
+#      在语音输入中
+#   3. 字符级攻击检测：零宽字符、控制字符、Unicode 混淆
+#   4. 不做语言判断（不禁止英文、法文、阿拉伯文等）
 
-# 需要拦截的注入关键词（大小写不敏感）
-_INJECTION_KEYWORDS = [
-    "ignore previous",
-    "override all rules",
-    "system:",
-    "system prompt",
-    "new instruction",
-    "disregard",
-    "you are now",
-    "your new task",
+# 合法的语音指令最大长度（超出即非正常语音）
+_MAX_VOICE_COMMAND_LENGTH = 100
+
+# 这些结构在任何语言中都不应该出现在正常的语音输入里
+# （不是"坏词"，而是"语音中不可能出现的结构模式"）
+_STRUCTURAL_SIGNATURES = [
+    # JSON / 数据序列化结构
+    (r'\{\s*"(?:intent|confidence|slots|command|action)"', "JSON 结构"),
+    (r'<json>|</json>|<\?xml', "XML/数据序列化结构"),
+    # Markdown / 代码块
+    (r'```', "代码块标记"),
+    (r'<system[^>]*>|</system>|<<SYS>>', "系统指令标记"),
+    # RestructuredText / 其他标记语言
+    (r'^={3,}\s*$|^-{3,}\s*$|^\*{3,}\s*$', "分隔线标记"),
+    # MIME/HTTP 风格头
+    (r'^[A-Za-z-]+:\s', "协议头风格语法"),
 ]
 
-# 正常语音命令的最大合理长度
-_MAX_VOICE_COMMAND_LENGTH = 100
+# Unicode 控制字符和混淆字符（零宽、方向覆盖等）
+_DANGEROUS_UNICODE_PATTERNS = [
+    (r'[​‌‍‎‏]', "零宽字符"),          # zero-width chars
+    (r'[‪-‮]', "Unicode 方向控制字符"),               # bidi override
+    (r'[￰-￿]', "Unicode 特殊区域字符"),               # specials block
+]
 
 
 def detect_injection(user_text: str) -> Optional[str]:
-    """检测输入是否为注入攻击，返回拒绝原因或 None。
+    """语言无关的注入检测。检测输入是否偏离'合法语音指令'的特征。
 
-    在调用 LLM 之前执行，节省 API 成本并提高安全性。
+    合法语音指令的特征:
+      - 简短 (<=100 字符)
+      - 不包含代码/标记/数据序列化结构
+      - 不包含 Unicode 攻击字符
     """
     text = user_text.strip()
-    text_lower = text.lower()
 
-    # 1. 包含 JSON 结构
-    if re.search(r'\{\s*"intent"\s*:', text):
-        return "输入包含 JSON 结构（疑似注入攻击）"
+    # 空输入是合法的（LLM 判 unknown）
+    if not text:
+        return None
 
-    # 2. 全英文（>80% ASCII 字母，且无中文字符）
-    ascii_letters = sum(1 for c in text if c in string.ascii_letters)
-    has_cjk = bool(re.search(r'[一-鿿]', text))
-    if not has_cjk and len(text) > 5 and ascii_letters / max(len(text), 1) > 0.6:
-        return "输入主要为英文（疑似注入攻击）"
-
-    # 3. 包含系统注入关键词
-    for kw in _INJECTION_KEYWORDS:
-        if kw in text_lower:
-            return f"输入包含注入关键词: '{kw}'"
-
-    # 4. 超长输入（超出语音指令合理范围）
+    # ── 第一层：长度约束 ──────────────────────────────────
     if len(text) > _MAX_VOICE_COMMAND_LENGTH:
-        return f"输入过长 ({len(text)} 字符，超出语音指令合理范围)"
+        return f"输入过长 ({len(text)} 字符，语音指令上限 {_MAX_VOICE_COMMAND_LENGTH})"
+
+    # ── 第二层：结构异常检测（语言无关）────────────────────
+    for pattern, label in _STRUCTURAL_SIGNATURES:
+        if re.search(pattern, text):
+            return f"输入包含非语音结构: {label}"
+
+    # ── 第三层：Unicode 攻击字符检测 ──────────────────────
+    for pattern, label in _DANGEROUS_UNICODE_PATTERNS:
+        if re.search(pattern, text):
+            return f"输入包含攻击性 Unicode 字符: {label}"
 
     return None
 

@@ -17,10 +17,6 @@ def _mock_fc_result(intent: str, confidence: float, slots=None):
             "slots": slots or [],
         },
     }
-    # 兜底路径的 call() 也用不到，但保留以防降级测试
-    mock_client.call.return_value = (
-        f'{{"intent": "{intent}", "confidence": {confidence}, "slots": []}}'
-    )
     return mock_client
 
 
@@ -51,26 +47,21 @@ class TestNLUEngineWithMock:
         assert result.intent == IntentCategory.UNKNOWN
         assert result.confidence == 0.0
 
-    # ── 兜底路径：FC 失败 → 降级到文本解析 ──
+    # ── FC 失败处理 ──
 
-    def test_fc_fails_fallback_to_text(self):
-        """FC 抛异常时自动降级到文本路径。"""
+    def test_fc_throws_exception_returns_unknown(self):
+        """FC 抛异常时直接返回 unknown，不崩溃。"""
         mock_client = MagicMock()
-        # FC 会失败
-        mock_client.call_with_function.side_effect = RuntimeError("FC failed")
-        # 文本路径返回正常
-        mock_client.call.return_value = (
-            '{"intent": "begin_gesture_recognition", "confidence": 0.95, "slots": []}'
-        )
+        mock_client.call_with_function.side_effect = RuntimeError("FC 网络错误")
         engine = NLUEngine(client=mock_client, simulate=False)
         result = engine.parse("开启手势识别")
-        assert result.intent == IntentCategory.BEGIN_GESTURE_RECOGNITION
+        assert result.intent == IntentCategory.UNKNOWN
+        assert result.confidence == 0.0
 
-    def test_fc_then_text_also_garbage(self):
-        """FC 失败 + 文本也是非法 JSON → unknown。"""
+    def test_fc_returns_empty_arguments(self):
+        """FC 未返回 tool_call 时返回 unknown。"""
         mock_client = MagicMock()
-        mock_client.call_with_function.side_effect = RuntimeError("FC failed")
-        mock_client.call.return_value = "garbage"
+        mock_client.call_with_function.return_value = {"name": "parse_intent", "arguments": {}}
         engine = NLUEngine(client=mock_client, simulate=False)
         result = engine.parse("测试")
         assert result.intent == IntentCategory.UNKNOWN

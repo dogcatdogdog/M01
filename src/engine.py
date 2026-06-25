@@ -1,17 +1,15 @@
-"""业务编排引擎：驱动 NLU 意图解析的完整流水线。
+"""业务编排引擎：驱动 NLU 意图解析的流水线。
 
-流水线（优先级从高到低）：
-  1. Function Calling → 强制 LLM 返回结构化 JSON
-  2. 文本解析 → FC 不可用时兜底解析 LLM 文本输出
+流水线：
+  输入文本 → 注入检测 → Function Calling → 结构化意图结果
 """
 
-import json
 import logging
 from typing import Optional
 
 from src.client import LLMClient, get_client
-from src.processor import load_prompt_template, format_input, parse_output, detect_injection
-from src.schemas import IntentCategory, IntentResult, IntentSlot, INTENT_ROUTING, get_nlu_function_schema
+from src.processor import load_prompt_template, detect_injection
+from src.schemas import IntentCategory, IntentResult, IntentSlot, get_nlu_function_schema
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +134,7 @@ class NLUEngine:
                 _simulate_api_call(result.routing_target, user_text)
             return result
 
-        # ── 主路径：Function Calling ──
+        # ── Function Calling ──
         try:
             fc_result = self.client.call_with_function(
                 prompt=user_text,
@@ -146,25 +144,23 @@ class NLUEngine:
             )
             if fc_result["arguments"]:
                 result = _parse_function_result(fc_result["arguments"], user_text)
-                logger.info(
-                    "NLU(FC) 结果: intent=%s, confidence=%.2f, routing=%s",
-                    result.intent.value, result.confidence, result.routing_target,
+            else:
+                logger.warning("FC 未返回 tool_call，返回 unknown")
+                result = IntentResult(
+                    intent=IntentCategory.UNKNOWN,
+                    confidence=0.0,
+                    raw_text=user_text,
                 )
-                if self.simulate:
-                    _simulate_api_call(result.routing_target, user_text)
-                return result
         except Exception as e:
-            logger.warning("Function calling 失败，降级到文本解析: %s", e)
+            logger.error("FC 调用异常，返回 unknown: %s", e)
+            result = IntentResult(
+                intent=IntentCategory.UNKNOWN,
+                confidence=0.0,
+                raw_text=user_text,
+            )
 
-        # ── 兜底路径：纯文本 + JSON 解析 ──
-        fmt = format_input(user_text, self.system_prompt)
-        raw = self.client.call(
-            prompt=fmt["prompt"],
-            system_prompt=fmt["system_prompt"],
-        )
-        result = parse_output(raw, user_text)
         logger.info(
-            "NLU(文本) 结果: intent=%s, confidence=%.2f, routing=%s",
+            "NLU 结果: intent=%s, confidence=%.2f, routing=%s",
             result.intent.value, result.confidence, result.routing_target,
         )
         if self.simulate:
